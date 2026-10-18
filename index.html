@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AWS VPC Lab: Security Groups vs Network ACLs</title>
+<meta name="description" content="A hands-on AWS lab: build a custom VPC, launch two EC2 instances, then change security group and NACL rules and test what traffic gets through.">
+<meta name="author" content="Rutuja Naik">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Mono:wght@400&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap bar">
+    <span class="brand">AWS VPC Lab</span>
+    <nav aria-label="Page sections">
+      <a href="#build">What you build</a>
+      <a href="#steps">Steps</a>
+      <a href="#rules">Rules</a>
+      <a href="#fixes">Troubleshooting</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero wrap">
+    <div class="hero-text">
+      <h1>Security groups and network ACLs both block traffic. Find out which one stops yours.</h1>
+      <p class="lead">Build a custom VPC, launch two EC2 instances, then change the rules one at a time and test what still gets through.</p>
+      <div class="actions">
+        <a class="btn primary" href="docs/AWS_VPC_Lab_Guide.pdf" download>Download the PDF guide</a>
+        <a class="btn" href="#steps">Read the steps</a>
+      </div>
+      <p class="byline">Created by Rutuja Naik</p>
+    </div>
+
+    <figure class="diagram">
+      <svg viewBox="0 0 640 350" role="img" aria-labelledby="dg-t dg-d">
+        <title id="dg-t">Lab network layout</title>
+        <desc id="dg-d">The internet connects through an Internet Gateway into the lab1-custom VPC. Inside is a public subnet guarded by a network ACL. In the subnet, Instance-A sits behind security group SGA and Instance-B sits behind security group SGB.</desc>
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="fill-navy"/></marker>
+        </defs>
+        <rect x="8" y="140" width="92" height="60" rx="8" class="box"/>
+        <text x="54" y="175" text-anchor="middle" class="t-label">Internet</text>
+        <line x1="100" y1="170" x2="190" y2="170" class="line" marker-end="url(#ah)"/>
+        <text x="106" y="160" class="t-small">Internet Gateway</text>
+
+        <rect x="150" y="14" width="480" height="322" rx="12" class="vpc"/>
+        <text x="168" y="40" class="t-title">VPC: lab1-custom</text>
+
+        <rect x="190" y="62" width="420" height="258" rx="8" class="subnet"/>
+        <text x="206" y="88" class="t-label">Public subnet</text>
+        <text x="206" y="106" class="t-small accent">Network ACL guards this boundary (stateless)</text>
+
+        <rect x="212" y="122" width="170" height="166" rx="8" class="sg"/>
+        <text x="226" y="142" class="t-label">SGA</text>
+        <rect x="228" y="154" width="138" height="118" rx="6" class="inst"/>
+        <text x="297" y="192" text-anchor="middle" class="t-label">Instance-A</text>
+        <text x="297" y="212" text-anchor="middle" class="t-small">Apache</text>
+        <text x="297" y="230" text-anchor="middle" class="t-small">HTTP 80, SSH 22</text>
+
+        <rect x="418" y="122" width="170" height="166" rx="8" class="sg"/>
+        <text x="432" y="142" class="t-label">SGB</text>
+        <rect x="434" y="154" width="138" height="118" rx="6" class="inst"/>
+        <text x="503" y="192" text-anchor="middle" class="t-label">Instance-B</text>
+        <text x="503" y="212" text-anchor="middle" class="t-small">Apache</text>
+        <text x="503" y="230" text-anchor="middle" class="t-small">Ping from SGA only</text>
+
+        <line x1="366" y1="246" x2="434" y2="246" class="line" marker-end="url(#ah)"/>
+        <text x="400" y="304" text-anchor="middle" class="t-small">Ping from A to B works because SGB trusts SGA</text>
+      </svg>
+      <figcaption>Solid navy: what you build. Orange: the NACL boundary you test in Change 2.</figcaption>
+    </figure>
+  </section>
+
+  <section id="build" class="wrap block">
+    <h2>What you build</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Resource</th><th>Name</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td>VPC</td><td><code>lab1-custom</code></td><td>Isolated network with public subnets and an Internet Gateway</td></tr>
+          <tr><td>Security group</td><td><code>SGA</code></td><td>Allows HTTP and SSH from anywhere</td></tr>
+          <tr><td>Security group</td><td><code>SGB</code></td><td>Allows HTTP, SSH, and ping (ICMP) from SGA</td></tr>
+          <tr><td>EC2 instance</td><td><code>Instance-A</code></td><td>Apache web server, uses SGA</td></tr>
+          <tr><td>EC2 instance</td><td><code>Instance-B</code></td><td>Apache web server, uses SGB</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">You need an AWS account and a key pair (or EC2 Instance Connect). Everything fits in the Free Tier as long as you skip the NAT gateway.</p>
+  </section>
+
+  <section id="steps" class="wrap block">
+    <h2>Steps</h2>
+    <ol class="steps">
+      <li>
+        <h3>Create the custom VPC</h3>
+        <p>In the VPC console choose <b>Create VPC</b>, then <b>VPC and more</b>. Name it <code>lab1-custom</code> and select no NAT gateway. Afterwards, turn on auto-assign public IPv4 for the public subnets.</p>
+      </li>
+      <li>
+        <h3>Create SGA and SGB</h3>
+        <p>Create SGA first (HTTP and SSH from anywhere). Then create SGB with the same two rules plus All ICMP - IPv4 from SGA.</p>
+      </li>
+      <li>
+        <h3>Launch the instances</h3>
+        <p>Amazon Linux, t2.micro, a public subnet, public IP enabled. Paste the script below into User data. Use SGA for Instance-A and SGB for Instance-B.</p>
+<pre><code>#!/bin/bash
+yum update -y
+yum install -y httpd
+systemctl start httpd
+systemctl enable httpd</code></pre>
+      </li>
+      <li>
+        <h3>Test the baseline</h3>
+        <p>Open each public IP in a browser. Connect with EC2 Instance Connect. Run <code>ping</code> from A to B's private IP. Run <code>curl</code> from B to A's public IP. All four should work.</p>
+      </li>
+      <li>
+        <h3>Change the rules and test again</h3>
+        <dl class="changes">
+          <dt>Change 1</dt>
+          <dd>Limit SGA HTTP to <code>YOUR_IP/32</code>. Your home Wi-Fi still loads the page. A mobile hotspot times out, and so does curl from Instance-B.</dd>
+          <dt>Change 2</dt>
+          <dd>Add a NACL inbound <b>deny</b> rule for your IP, numbered <code>90</code>. It must be lower than the default allow rule (100) because the lowest matching number wins. The page now fails even though SGA allows you.</dd>
+          <dt>Change 3</dt>
+          <dd>Limit SGB HTTP to SGA as the source. Browsers can no longer reach Instance-B. Curl from Instance-A works, but only when you use B's <b>private</b> IP.</dd>
+        </dl>
+      </li>
+    </ol>
+  </section>
+
+  <section id="rules" class="wrap block">
+    <h2>Rules at a glance</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Item</th><th>Start</th><th>After Change 1</th><th>After Change 3</th></tr></thead>
+        <tbody>
+          <tr><td>SGA, HTTP 80</td><td><code>0.0.0.0/0</code></td><td>Your home IP /32</td><td>Same as Change 1</td></tr>
+          <tr><td>SGA, SSH 22</td><td><code>0.0.0.0/0</code></td><td>Unchanged</td><td>Unchanged</td></tr>
+          <tr><td>SGB, HTTP 80</td><td><code>0.0.0.0/0</code></td><td>Unchanged</td><td>Source is SGA</td></tr>
+          <tr><td>SGB, ICMP</td><td>Source is SGA</td><td>Unchanged</td><td>Unchanged</td></tr>
+          <tr><td>Subnet NACL</td><td>Default, allow all</td><td>Unchanged</td><td>Unchanged</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul class="lessons">
+      <li>Security groups only allow traffic. NACLs can allow or deny.</li>
+      <li>Security groups are stateful. NACLs are stateless and are checked first, at the subnet boundary.</li>
+      <li>A rule that names a security group matches private addresses only, so test with the private IP.</li>
+    </ul>
+  </section>
+
+  <section id="fixes" class="wrap block">
+    <h2>Troubleshooting</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Problem</th><th>Likely cause and fix</th></tr></thead>
+        <tbody>
+          <tr><td>Browser shows nothing</td><td>The URL uses <code>https://</code>, or Apache has not started. Use <code>http://</code> and check that the User data ran.</td></tr>
+          <tr><td>No public IP on the instance</td><td>Auto-assign was off. Turn it on for the subnet, or relaunch with Auto-assign public IP set to Enable.</td></tr>
+          <tr><td>Ping from A to B fails</td><td>Check that SGB has the ICMP rule with SGA as source, and use B's private IP.</td></tr>
+          <tr><td>NACL deny does nothing</td><td>Its rule number is higher than the allow rule. Use a lower number such as 90.</td></tr>
+          <tr><td>Locked out after Change 1</td><td>Your home IP has changed. Update the SGA rule with your current IP.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">When you finish, terminate both instances, delete the <code>lab1-custom</code> VPC, then delete SGA and SGB.</p>
+  </section>
+
+  <section class="wrap get">
+    <h2>Take the full guide with you</h2>
+    <p>The PDF has every rule table, test, and expected result in four pages.</p>
+    <a class="btn primary" href="docs/AWS_VPC_Lab_Guide.pdf" download>Download the PDF guide</a>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Created by Rutuja Naik</p>
+  </div>
+</footer>
+
+</body>
+</html>
